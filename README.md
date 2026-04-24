@@ -1,7 +1,7 @@
 # 🤖 PX97-Axon — Modelo Preditivo para Mini-índice Bovespa (WIN)
 
 Sistema automatizado de análise técnica e decisão de entrada para o Mini-índice Bovespa (WIN),
-desenvolvido integralmente em Python. O modelo combina uma rede GRU (Gated Recurrent Unit) treinada com indicadores
+desenvolvido integralmente em Python. O modelo combina uma rede LSMT treinada com indicadores
 técnicos selecionados por análise de effect size para gerar sinais de compra com critérios de validação em múltiplas camadas.
 
 Por se tratar de um sistema desenvolvido com intuito de pesquisa e aprendizado, algumas das 
@@ -49,7 +49,7 @@ operador em tempo real
 
 ```python
 px97_axon_trader.py              # Entry point — loop principal de operação
-├── config.py                    # Parâmetros globais, carregamento do modelo GRU e scaler
+├── config.py                    # Parâmetros globais, carregamento do modelo LSMT e scaler
 ├── funcoes.py                   # Toda a lógica operacional:
 │   ├── calculate_indicators()   # Cálculo dos 20 indicadores
 │   ├── prepare_input()          # Preparação e normalização para o LSTM
@@ -67,7 +67,7 @@ px97_axon_trader.py              # Entry point — loop principal de operação
 │       └── /simulate        — volta ao modo paper trading
 ├── modelo_auxiliar.py           # Random Forest treinado nos logs de operações reais:
 │   ├── Carrega modelo .joblib com threshold dinâmico otimizado
-│   ├── Atua como segundo filtro após o GRU — aprova ou rejeita o sinal
+│   ├── Atua como segundo filtro após o LSMT — aprova ou rejeita o sinal
 │   └── Retreinado periodicamente com novos logs (bypass ativo durante acumulação)
 ├── analise_sentimento.py        # Executado no início do dia:
 │   ├── Score fuzzy 0–1 (0 = mercado extremamente negativo, 1 = positivo)
@@ -79,7 +79,7 @@ px97_axon_trader.py              # Entry point — loop principal de operação
 
 ```
 obter_historico_mini_indice.py   # Coleta histórico M5 via MT5 e gera CSV com indicadores
-treino_px97_axon_markI_5min.py   # Treina o modelo GRU principal (grid search + checkpoint)
+treino_px97_axon_markI_5min.py   # Treina o modelo LSMT principal (grid search + checkpoint)
 treino_auxiliary_model.py        # Treina o Random Forest auxiliar com logs de operações reais
 ```
 
@@ -107,11 +107,9 @@ O modelo de treino usa **10 features** selecionadas por análise de effect size.
 
 Script: `treino_px97_axon_markI_5min.py`
 
-Arquitetura **GRU minimalista** escolhida após diagnóstico de effect size das features — modelos mais complexos (LSTM com atenção, bidirecional) colapsaram por excesso de parâmetros para o volume disponível de dados (~16k amostras).
-
 | Componente | Detalhe |
 |---|---|
-| Arquitetura | GRU 32 → GRU 16 → Dense 16 → sigmoid |
+| Arquitetura |LSMT|
 | Scaler | RobustScaler (resistente a outliers do WIN) |
 | Janela | Grid search: 10, 20 ou 40 candles |
 | Features | 10 selecionadas por effect size (> 0.1) |
