@@ -1,8 +1,8 @@
 # 🤖 PX97-Axon — Modelo Preditivo para Mini-índice Bovespa (WIN)
 
 Sistema automatizado de análise técnica e decisão de entrada para o Mini-índice Bovespa (WIN),
-desenvolvido integralmente em Python. O modelo combina uma rede LSTM treinada com indicadores
-técnicos clássicos para gerar sinais de compra com critérios de validação em múltiplas camadas.
+desenvolvido integralmente em Python. O modelo combina uma rede GRU (Gated Recurrent Unit) treinada com indicadores
+técnicos selecionados por análise de effect size para gerar sinais de compra com critérios de validação em múltiplas camadas.
 
 Por se tratar de um sistema desenvolvido com intuito de pesquisa e aprendizado, algumas das 
 funcionalidades citadas podem estar comentadas ou com algum tipo de Bupass. Caso queira 
@@ -49,7 +49,7 @@ operador em tempo real
 
 ```python
 px97_axon_trader.py              # Entry point — loop principal de operação
-├── config.py                    # Parâmetros globais, carregamento do modelo LSTM e scaler
+├── config.py                    # Parâmetros globais, carregamento do modelo GRU e scaler
 ├── funcoes.py                   # Toda a lógica operacional:
 │   ├── calculate_indicators()   # Cálculo dos 20 indicadores
 │   ├── prepare_input()          # Preparação e normalização para o LSTM
@@ -67,7 +67,7 @@ px97_axon_trader.py              # Entry point — loop principal de operação
 │       └── /simulate        — volta ao modo paper trading
 ├── modelo_auxiliar.py           # Random Forest treinado nos logs de operações reais:
 │   ├── Carrega modelo .joblib com threshold dinâmico otimizado
-│   ├── Atua como segundo filtro após o LSTM — aprova ou rejeita o sinal
+│   ├── Atua como segundo filtro após o GRU — aprova ou rejeita o sinal
 │   └── Retreinado periodicamente com novos logs (bypass ativo durante acumulação)
 ├── analise_sentimento.py        # Executado no início do dia:
 │   ├── Score fuzzy 0–1 (0 = mercado extremamente negativo, 1 = positivo)
@@ -75,25 +75,90 @@ px97_axon_trader.py              # Entry point — loop principal de operação
 └── sentment_analysis.py         # Coleta notícias via RSS + análise por LLM (OpenRouter)
 ```
 
----
+**Scripts de treino e coleta (executados offline):**
 
-## 📌 Features do modelo LSTM
-
-O modelo recebe uma janela de 60 candles com 20 features por candle:
-
-| Categoria | Features |
-|-----------|----------|
-| Volume | `volume` |
-| Médias | `SMA_10`, `EMA_20` |
-| Momentum | `RSI_14`, `rsi` (manual), `MACD_12_26_9`, `MACDh_12_26_9`, `MACDs_12_26_9` |
-| Volatilidade | `BBL_5_2.0`, `BBM_5_2.0`, `BBU_5_2.0`, `BBB_5_2.0`, `BBP_5_2.0`, `ATRr_14` |
-| Tendência | `OBV` |
-| Temporal | `hour_sin`, `hour_cos`, `day_sin`, `day_cos` |
-| Retorno | `log_ret` |
+```
+obter_historico_mini_indice.py   # Coleta histórico M5 via MT5 e gera CSV com indicadores
+treino_px97_axon_markI_5min.py   # Treina o modelo GRU principal (grid search + checkpoint)
+treino_auxiliary_model.py        # Treina o Random Forest auxiliar com logs de operações reais
+```
 
 ---
 
-## 📌 Critérios de entrada (TREND_FOLLOWING)
+## 📌 Features do modelo
+
+O modelo de treino usa **10 features** selecionadas por análise de effect size. O pipeline de produção (`funcoes.py`) calcula um conjunto maior de indicadores, dos quais o scaler filtra apenas as features relevantes.
+
+| Categoria | Feature | Effect size |
+|---|---|---|
+| Volatilidade | `ATRr_14` | mais importante (RF) |
+| Retorno | `log_ret` | — |
+| Retorno defasado | `ret_lag1` | autocorr = -0.37 |
+| Tendência | `dist_ema` | -0.39 |
+| Posição Bollinger | `BBP_5_2.0_2.0` | -0.43 |
+| Momentum | `MACDh_12_26_9` | -0.56 (melhor sinal) |
+| Momentum | `RSI_14` | -0.23 |
+| Tendência | `ema_slope3` | direção EMA em 3 candles |
+| Temporal | `hour_sin` / `hour_cos` | codificação cíclica da hora |
+
+
+
+## 🏋️ Treinamento do modelo principal
+
+Script: `treino_px97_axon_markI_5min.py`
+
+Arquitetura **GRU minimalista** escolhida após diagnóstico de effect size das features — modelos mais complexos (LSTM com atenção, bidirecional) colapsaram por excesso de parâmetros para o volume disponível de dados (~16k amostras).
+
+| Componente | Detalhe |
+|---|---|
+| Arquitetura | GRU 32 → GRU 16 → Dense 16 → sigmoid |
+| Scaler | RobustScaler (resistente a outliers do WIN) |
+| Janela | Grid search: 10, 20 ou 40 candles |
+| Features | 10 selecionadas por effect size (> 0.1) |
+| Target | Simulação real do trade: alvo 1.65× ATR, stop 1.19× ATR |
+| Regularização | L2 (2e-4) + Dropout 0.30 + BatchNormalization |
+| Otimizador | Adam (lr=1e-3, clipnorm=1.0) |
+| Callbacks | EarlyStopping + ReduceLROnPlateau + ModelCheckpoint |
+
+O target é gerado simulando o trade real sobre o histórico: para cada candle, o algoritmo verifica se nos próximos N candles o preço teria atingido o alvo antes do stop. Casos ambíguos (ambos ou nenhum atingido) são descartados do treino.
+
+---
+
+## 🏋️ Treinamento do modelo auxiliar (2º filtro)
+
+Script: `treino_auxiliary_model.py`
+
+Random Forest treinado exclusivamente sobre os **logs de operações reais** gerados pelo sistema em produção — não sobre dados históricos sintéticos.
+
+| Componente | Detalhe |
+|---|---|
+| Algoritmo | RandomForestClassifier (100 estimadores) |
+| Features | `proba`, `rsi`, `preco_entrada`, `alvo`, `stop` |
+| Target | GAIN=1 / LOSS=0 (TIME_DROP excluído) |
+| Threshold | Otimizado via curva precision-recall (F1 máximo) |
+| Output | `.joblib` com modelo + threshold dinâmico juntos |
+
+O threshold é recalculado a cada retreino com base no histórico real acumulado. Quanto mais operações registradas, mais preciso o filtro.
+
+---
+
+## 📥 Coleta de dados históricos
+
+Script: `obter_historico_mini_indice.py`
+
+Coleta candles M5 do WIN diretamente do MetaTrader 5, calcula os indicadores técnicos e salva CSV pronto para treino.
+
+**Estratégia de coleta:**
+1. Tenta o símbolo contínuo `WIN$` (histórico unificado, quando disponível na corretora)
+2. Fallback automático para contratos individuais (`WINF19`, `WING19`...) com janela de ±90 dias por vencimento
+3. Remove duplicatas de timestamp e linhas com NaN após cálculo de indicadores
+
+```bash
+python obter_historico_mini_indice.py
+# Output: dados/dados_mini_indice_M5_COM_INDICADORES_<data>.csv
+```
+
+---
 
 ```Markdown
 
